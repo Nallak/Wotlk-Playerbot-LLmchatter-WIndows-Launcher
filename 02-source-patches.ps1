@@ -223,6 +223,13 @@ if ((Test-Path $ChatterSrcDir) -and (Test-Path $WorldSessionH) -and (Test-Path $
         $pc = [regex]::Replace($pc, '(?m)^void Player::ClearChannelWatch\(\)', ($shim + $nlC + $nlC + 'void Player::ClearChannelWatch()'))
         Write-Utf8Keep $PlayerCpp $pc
         Ok "Patch 8b applied"
+    } elseif ($chatterUsesIsInChannel -and ($ph -notmatch 'IsInChannel') -and ($pc -notmatch 'Player::IsInChannel')) {
+        # Chatter needs it, the core has no IsInChannel, but the insertion anchors were not
+        # found (Player.h / Player.cpp changed). Say so loudly - otherwise this looks like a
+        # normal skip and the build then fails with C2039 and no hint why.
+        Warn "Patch 8b - mod-llm-chatter calls Player::IsInChannel() but the core has none, and the patch anchors"
+        Warn "           (LeftChannel in Player.h / ClearChannelWatch in Player.cpp) were not found - NOT patched."
+        Warn "           Expect build error C2039 'IsInChannel'. Patch 8b needs updating for this core version."
     } else {
         Ok "Patch 8b - skipping (core still has IsInChannel, chatter no longer calls it, or already patched)"
     }
