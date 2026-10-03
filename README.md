@@ -2,11 +2,31 @@
 
 **Pirate Fleet Edition** - a native Windows build pipeline for an AzerothCore (WotLK 3.3.5a) server with Playerbots and AI-powered bot chatter, plus a graphical server manager to run it all day-to-day.
 
+Also hosted on [Gitea](https://gitea.com/Eldesan/wotlk-windows-launcher).
+
 ---
 
 # 📢 Project Status & Latest Updates
 
 > **Status:** 🟢 Active
+
+## ✅ Update (2026-10-03)
+
+- **Builds on the latest Playerbot core again.** After the Playerbot "core-align" merge, the core dropped two helpers that
+  `mod-llm-chatter` still calls (`WorldSession::IsBot()` -> `IsHeadless()`, and `Player::IsInChannel()`, which is gone), so
+  the build stopped with `C2039`. Stage 02 now carries **Patch 8**, which bridges both. It checks the real sources first and
+  only patches when needed, so it does nothing on an older core and drops out by itself once chatter catches up.
+  Verified with a from-scratch install on core `f19a18799`: it builds, the world server starts, and the bots chat in-game.
+- **`02-source-pathces.ps1` is now `02-source-patches.ps1`** (typo fixed). Delete the old file from
+  `C:\Azerothcore\wowmenu-scripts`; the menu downloads the new name on the next build.
+- **First build creates your core configs.** If `worldserver.conf` / `authserver.conf` don't exist yet, the menu copies them
+  from their `.dist` after a successful build. Existing configs are never overwritten, only missing keys are appended
+  (a `.bck` backup is kept).
+- **"Backup all" no longer dumps the playerbots database** (regenerable bot data). Restoring an older playerbots backup
+  still works.
+- **Also on GitHub.** The repo is mirrored; each copy's installer downloads from its own host.
+- **Updating an existing install:** use **Update Core + Modules**, then **Build**. Expect a full rebuild, because the core
+  headers change.
 
 ## ⚠️ Update (2026-08-27)
 
@@ -104,7 +124,7 @@ Everything is a numbered PowerShell stage, run in order by the orchestrator:
 
 ```
 01  Clone AzerothCore + all modules (git, latest HEAD - not pinned)
-02  Apply MSVC-specific source patches (MySQL SSL, ODR fix, version checks)
+02  Apply MSVC-specific source patches (MySQL SSL, ODR fix, version checks) + Playerbot core / mod-llm-chatter compat (Patch 8)
 03  CMake configure + MSBuild compile, install, copy DLLs, clean up the tree
 04  Client data + database setup + config patching
 05  Ollama install only (no model - that's picked from the menu, see below)
@@ -171,6 +191,9 @@ Two of the modules add vendor NPCs you spawn yourself with a GM macro. Create th
 - `WOTLK-Menu.exe` checks for and repairs missing runtime DLLs (libmysql, OpenSSL 3.x + 4.x, legacy provider) every time it launches - if stage 03's own DLL-copy step ever gets skipped, opening the menu fixes it automatically.
 - llm-chatter's database tables are created by DBUpdater the first time World server boots, not by any install stage - start World server before the LLM bridge, always.
 
+- Re-installing is safe for your data: deleting `C:\Azerothcore` and `C:\Build` does not touch MySQL, so accounts, characters and bot
+  data survive a fresh install. At stage 04, type the **same `acore` password** again - the existing database user keeps its old one.
+
 ## Troubleshooting
 
 **"command does not exist" for a GM command in-game** - your account isn't GM level 3, or the level change hasn't taken effect yet. See "Useful in-game commands" above.
@@ -179,8 +202,12 @@ Two of the modules add vendor NPCs you spawn yourself with a GM macro. Create th
 
 **worldserver.exe fails with a missing DLL error** - open `WOTLK-Menu.exe`; it self-checks and repairs this on every launch. If it still fails after that, MySQL or OpenSSL likely aren't installed at the paths PREREQUISITES.md expects.
 
+**Build stops with `C2039` about `IsBot` or `IsInChannel` (mod-llm-chatter)** - stage 02's Patch 8 did not run or could not apply. Check
+the top of the build log for `Patch 8a` / `Patch 8b`. A `[WARN] Patch 8b ... NOT patched` line means the core changed enough that the patch
+needs updating - report that line together with your core commit (`git -C C:\Azerothcore log -1 --oneline`).
+
 **`C:\Azerothcore` still has source-tree clutter (`src`, `deps`, `.github`, etc.) after a full run** - stage 03's cleanup step got skipped, usually because a leftover resume-state file marked stage 03 as already done (see the Resume caveat under Architecture). Delete `.wotlk-orchestrator-state` and re-run the orchestrator, or just manually remove the clutter folders - `bin`, `configs`, `data`, `logs`, `modules`, and the compiled exes are the only things that need to stay.
 
 ## Status
 
-Battle-tested end to end on fresh Windows 11, as of July 2026. If something in here breaks for you, it's almost certainly a prerequisite version mismatch - check PREREQUISITES.md first.
+Battle-tested end to end on fresh Windows 11, as of July 2026, and re-verified from scratch on 2026-10-03 with the latest Playerbot core. If something in here breaks for you, it's almost certainly a prerequisite version mismatch - check PREREQUISITES.md first.
