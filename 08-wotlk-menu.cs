@@ -102,7 +102,7 @@ namespace WotlkMenu
         // you're testing a stale build, not the code that was actually
         // changed - that's the first thing to rule out before chasing any
         // more paint-code theories.
-        const string BuildTag = "update-2026-10-03-dropplayerbotsfrombackup-createcoreconfs";
+        const string BuildTag = "update-2026-10-03-refreshpatchscripts";
 
         // -- Theme --------------------------------------------------------
         // -- Theme (2026 navy/gold refresh) --------------------------------
@@ -3614,23 +3614,63 @@ namespace WotlkMenu
         void RunSourcePatchesScript()
         {
             string script = Path.Combine(ScriptsDir, "02-source-patches.ps1");
-            if (!File.Exists(script))
+            // Always refresh from the repo first, not only when the file is
+            // missing - see RefreshScriptFromHost() for why and how it stays safe.
+            if (!RefreshScriptFromHost("02-source-patches.ps1", script))
             {
-                SafeInvoke(delegate { Log("[WARN] 02-source-patches.ps1 not found at: " + script + " - downloading a fresh copy from Gitea..."); });
-                try { Directory.CreateDirectory(ScriptsDir); } catch { }
-                int dlCode = RunCurlDownload(RawBase + "02-source-patches.ps1", script);
-                if (dlCode != 0 || !File.Exists(script))
-                {
-                    SafeInvoke(delegate { Log("[WARN] Could not download 02-source-patches.ps1 (curl exit " + dlCode + ") - skipping source-compat patches for this build"); });
-                    return;
-                }
-                SafeInvoke(delegate { Log("[OK] Downloaded 02-source-patches.ps1"); });
+                SafeInvoke(delegate { Log("[WARN] No 02-source-patches.ps1 available - skipping source-compat patches for this build"); });
+                return;
             }
             SafeInvoke(delegate { Log("[INFO] Applying known source-compat patches (02-source-patches.ps1)..."); });
             int code = RunStreamed("powershell",
                 "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"", ScriptsDir);
             if (code != 0)
                 SafeInvoke(delegate { Log("[WARN] Source-compat patch script exited with code " + code + " - check the log above, continuing to build anyway"); });
+        }
+
+        // Refreshes one companion script (02 / 03) from the repo right before it
+        // is used, so a stale local copy can never be run by mistake. The menu
+        // used to download only when the file was MISSING, which let an old
+        // 02-source-patches.ps1 keep running long after the repo moved on.
+        // Safe order: download to "<file>.new" first, and only when that worked
+        // (curl ok and the file is not empty) copy it over the local one. If the
+        // download fails (host down, offline) the existing copy is kept and a
+        // warning is logged, so a bad day on the host never leaves the user with
+        // NO script. Returns true when a usable local copy exists afterwards.
+        bool RefreshScriptFromHost(string fileName, string localPath)
+        {
+            try { Directory.CreateDirectory(Path.GetDirectoryName(localPath)); } catch { }
+            string tmp = localPath + ".new";
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+
+            int dlCode = RunCurlDownload(RawBase + fileName, tmp);
+            bool fresh = false;
+            try { fresh = dlCode == 0 && File.Exists(tmp) && new FileInfo(tmp).Length > 0; } catch { }
+
+            if (fresh)
+            {
+                try
+                {
+                    File.Copy(tmp, localPath, true);
+                    SafeInvoke(delegate { Log("[OK] " + fileName + " refreshed from the repo"); });
+                }
+                catch (Exception ex)
+                {
+                    string why = ex.Message;
+                    SafeInvoke(delegate { Log("[WARN] Could not replace " + fileName + " (" + why + ") - using the existing copy"); });
+                }
+            }
+            else if (File.Exists(localPath))
+            {
+                SafeInvoke(delegate { Log("[WARN] Could not download " + fileName + " (curl exit " + dlCode + ") - using the existing local copy, which may be out of date"); });
+            }
+            else
+            {
+                SafeInvoke(delegate { Log("[WARN] Could not download " + fileName + " (curl exit " + dlCode + ") and no local copy exists"); });
+            }
+
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            return File.Exists(localPath);
         }
 
         void RunBuildScript(bool clean)
@@ -3652,19 +3692,16 @@ namespace WotlkMenu
                     // same Gitea raw source UpdateFromGitea() already uses,
                     // via the same proven curl path (RunCurlDownload) -
                     // before any build work starts.
-                    if (!File.Exists(script))
+                    // Refreshed on every build (not only when missing) so the
+                    // build script is never stale; if the download fails the
+                    // existing copy is used - see RefreshScriptFromHost().
+                    if (!RefreshScriptFromHost("03-build.ps1", script))
                     {
-                        SafeInvoke(delegate { Log("[WARN] 03-build.ps1 not found next to the exe at: " + script + " - downloading a fresh copy from Gitea..."); });
-                        int dlCode = RunCurlDownload(RawBase + "03-build.ps1", script);
-                        if (dlCode != 0 || !File.Exists(script))
+                        SafeInvoke(delegate
                         {
-                            SafeInvoke(delegate
-                            {
-                                Log("[FAIL] Could not download 03-build.ps1 (curl exit " + dlCode + ") - copy it from your install scripts folder into the same folder as WOTLK-Menu.exe");
-                            });
-                            return;
-                        }
-                        SafeInvoke(delegate { Log("[OK] Downloaded 03-build.ps1 - continuing build..."); });
+                            Log("[FAIL] 03-build.ps1 is missing and could not be downloaded - copy it from your install scripts folder into the same folder as WOTLK-Menu.exe");
+                        });
+                        return;
                     }
 
                     EnsureCoreSourceFilesRestored();
