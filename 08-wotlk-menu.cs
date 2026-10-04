@@ -102,7 +102,7 @@ namespace WotlkMenu
         // you're testing a stale build, not the code that was actually
         // changed - that's the first thing to rule out before chasing any
         // more paint-code theories.
-        const string BuildTag = "update-2026-10-03-refreshpatchscripts";
+        const string BuildTag = "update-2026-10-04-win-columns-splitter";
 
         // -- Theme --------------------------------------------------------
         // -- Theme (2026 navy/gold refresh) --------------------------------
@@ -206,6 +206,24 @@ namespace WotlkMenu
         }
 
         // ============================ UI BUILD ========================
+        // Output box height: about double the old 150 px, a bit more on big
+        // windows (about 45% of the window, capped at 400), never below 150.
+        // Measured in 96-dpi units and scaled, so it looks the same on any DPI.
+        // Drag the handle above the box to resize it yourself; once dragged
+        // the auto-size stops. Double-click the handle to go back to auto.
+        bool logUserSized;
+
+        void AdjustLogHeight()
+        {
+            if (txtOut == null || logUserSized) return;
+            float k = 1f;
+            try { using (Graphics g = CreateGraphics()) k = g.DpiX / 96f; } catch { }
+            if (k < 0.5f) k = 1f;
+            double clientLogical = ClientSize.Height / k;
+            int h = (int)(Math.Max(150.0, Math.Min(400.0, clientLogical * 0.45)) * k);
+            if (txtOut.Height != h) txtOut.Height = h;
+        }
+
         void BuildUi()
         {
             BackColor = BgDark;
@@ -216,7 +234,7 @@ namespace WotlkMenu
             txtOut.ReadOnly = true;
             txtOut.ScrollBars = ScrollBars.Vertical;
             txtOut.Dock = DockStyle.Bottom;
-            txtOut.Height = 150;
+            txtOut.Height = 300;
             txtOut.BackColor = Color.FromArgb(12, 14, 20);
             txtOut.ForeColor = AccCyan;
             txtOut.Font = new Font("Consolas", 9F);
@@ -306,9 +324,23 @@ namespace WotlkMenu
 
             if (sectionPanels.Count > 0) ShowSection(0);
 
+            // Drag handle between the pages and the output box. Add order
+            // matters: the splitter has to be docked right after txtOut.
+            Splitter logSplit = new Splitter();
+            logSplit.Dock = DockStyle.Bottom;
+            logSplit.Height = 7;
+            logSplit.BackColor = BorderCol;
+            logSplit.MinSize = 80;
+            logSplit.MinExtra = 220;
+            logSplit.SplitterMoved += delegate { logUserSized = true; };
+            logSplit.DoubleClick += delegate { logUserSized = false; AdjustLogHeight(); };
+
             Controls.Add(content);
             Controls.Add(sidebar);
+            Controls.Add(logSplit);
             Controls.Add(txtOut);
+            Resize += delegate { AdjustLogHeight(); };
+            AdjustLogHeight();
         }
 
         // Registers one sidebar entry + its section panel, wiring the
@@ -719,10 +751,46 @@ namespace WotlkMenu
             return p;
         }
 
+        // Two side-by-side columns inside a tab's flow.
+        void TwoColumns(FlowLayoutPanel f, out FlowLayoutPanel left, out FlowLayoutPanel right)
+        {
+            FlowLayoutPanel columns = new FlowLayoutPanel();
+            columns.FlowDirection = FlowDirection.LeftToRight;
+            columns.WrapContents = false;
+            columns.AutoSize = true;
+            columns.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            columns.Margin = new Padding(0);
+            columns.BackColor = BgPanel;
+            f.Controls.Add(columns);
+
+            left = new FlowLayoutPanel();
+            left.FlowDirection = FlowDirection.TopDown;
+            left.WrapContents = false;
+            left.AutoSize = true;
+            left.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            left.Margin = new Padding(0, 0, 16, 0);
+            left.BackColor = BgPanel;
+            columns.Controls.Add(left);
+
+            right = new FlowLayoutPanel();
+            right.FlowDirection = FlowDirection.TopDown;
+            right.WrapContents = false;
+            right.AutoSize = true;
+            right.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            right.Margin = new Padding(0);
+            right.BackColor = BgPanel;
+            columns.Controls.Add(right);
+        }
+
         Panel BuildLlmTab()
         {
             FlowLayoutPanel f;
             Panel p = NewTab("LLM Bridge", out f);
+
+            // Two columns: AI model + chatter tuning on the left,
+            // Ollama + bridge controls on the right.
+            FlowLayoutPanel colL, colR;
+            TwoColumns(f, out colL, out colR);
 
             // -- AI MODEL (pick installed, or pull new) ----------------------
             // Ollama itself is installed system-wide by stage 05. The picker
@@ -751,7 +819,7 @@ namespace WotlkMenu
             Label modelHint = HeadLabel("New model? Type its name and Pull. Examples: mistral-nemo:12b | HammerAI/mn-mag-mell-r1 | llama3.2:3b", AccGray);
             modelHint.Font = new Font("Segoe UI", 8.25F);
 
-            f.Controls.Add(SectionCard("AI MODEL",
+            colL.Controls.Add(SectionCard("AI MODEL",
                 Row(cmbInstalledModels,
                     Btn("Refresh list", AccCyan, delegate { RefreshInstalledModels(); }),
                     Btn("Check current model", AccCyan, delegate { ReportAiStatus(); }),
@@ -782,7 +850,7 @@ namespace WotlkMenu
             Label tuningRestartHint = HeadLabel("Restart LLM bridge after any change for it to take effect.", AccGray);
             tuningRestartHint.Font = new Font("Segoe UI", 8.25F);
 
-            f.Controls.Add(SectionCard("CHATTER TUNING",
+            colL.Controls.Add(SectionCard("CHATTER TUNING",
                 lblChatterTuning,
                 Row(
                     Btn("Default (shipped)", AccGray, delegate { ApplyChatterPreset(false); }),
@@ -797,13 +865,13 @@ namespace WotlkMenu
                 Row(Btn("Save Custom Values", AccGreen, delegate { SaveChatterTuning(); })),
                 tuningRestartHint));
 
-            f.Controls.Add(SectionCard("OLLAMA",
+            colR.Controls.Add(SectionCard("OLLAMA",
                 Row(
                     Btn("Start Ollama", AccGreen, delegate { StartOllama(); }),
                     Btn("Stop Ollama", AccRed, delegate { StopOllama(); }),
                     Btn("List models", AccCyan, delegate { ListModels(); }))));
 
-            f.Controls.Add(SectionCard("BRIDGE",
+            colR.Controls.Add(SectionCard("BRIDGE",
                 Row(
                     Btn("Start LLM bridge", AccGreen, delegate { StartBridge(); }),
                     Btn("Stop LLM bridge", AccRed, delegate { StopBridge(); }),
@@ -2961,8 +3029,9 @@ namespace WotlkMenu
             FlowLayoutPanel f;
             Panel p = NewTab("Modules & Data", out f);
 
-            // Two columns: left holds Core/Add/Installed, right holds Build,
-            // so a long build isn't buried at the bottom of one long scroll.
+            // Two columns: left holds Core/Add, right holds Installed modules
+            // with the Build card below it, so a long build isn't buried at
+            // the bottom of one long scroll.
             FlowLayoutPanel columns = new FlowLayoutPanel();
             columns.FlowDirection = FlowDirection.LeftToRight;
             columns.WrapContents = false;
@@ -3038,7 +3107,7 @@ namespace WotlkMenu
             lstModules.BorderStyle = BorderStyle.FixedSingle;
             lstModules.Margin = new Padding(0, 8, 0, 8);
 
-            left.Controls.Add(SectionCard("INSTALLED MODULES",
+            right.Controls.Add(SectionCard("INSTALLED MODULES",
                 Row(
                     Btn("Refresh list", AccCyan, delegate { RefreshModuleList(); }),
                     Btn("Update selected (pull only)", AccCyan, delegate { UpdateSelectedModule(); }),
