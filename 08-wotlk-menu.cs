@@ -96,7 +96,7 @@ namespace WotlkMenu
         static readonly string MariaDataDir  = MariaDir + @"\data";
 
         // Self-update source - adjust if the repo moves
-        const string RawBase = "https://raw.githubusercontent.com/Nallak/Wotlk-Playerbot-LLmchatter-WIndows-Launcher/main/";
+        const string RawBase = "https://gitea.com/Eldesan/wotlk-windows-launcher/raw/branch/main/";
         // Bump this string every time a fix is applied here. If the exe
         // you're running doesn't show this exact tag in its startup log,
         // you're testing a stale build, not the code that was actually
