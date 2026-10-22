@@ -440,6 +440,7 @@ if (Test-Path $LlmConf) {
     Set-ConfValue $LlmConf "LLMChatter.Provider" "ollama"
     Set-ConfValue $LlmConf "LLMChatter.Model" "mistral-nemo:12b"
     Set-ConfValue $LlmConf "LLMChatter.Ollama.BaseUrl" "http://127.0.0.1:11434"
+    Set-ConfValue $LlmConf "LLMChatter.Database.Port" "$MySqlPort"
     Set-ConfValue $LlmConf "LLMChatter.Database.User" "acore"
     Set-ConfValue $LlmConf "LLMChatter.Database.Password" "$DbPass"
     Ok "mod_llm_chatter.conf configured for Ollama (provider/model/baseurl/DB creds)"
