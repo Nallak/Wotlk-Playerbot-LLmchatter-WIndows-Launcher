@@ -308,32 +308,98 @@ Write-Host ""
 
 # -- Create databases + user -------------------------------------------------
 Info "Creating databases..."
-$rootPass = Read-Host "  MySQL root password (leave blank if none)" -AsSecureString
-$bstrRoot = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($rootPass)
-$rootPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstrRoot)
+
+# MySQL port: always asked. Enter keeps the default (3306, or MYSQL_TCP_PORT if set).
+# The chosen port is used for setup below, written into the 3 server configs, and
+# into .my.cnf so the menu's mysql/mysqldump calls use it too.
+$MySqlPort = 3306
+if ($env:MYSQL_TCP_PORT -match '^\d+$') { $MySqlPort = [int]$env:MYSQL_TCP_PORT }
+Write-Host "  Which port is your MySQL running on? (default 3306; use your own if you changed it)" -ForegroundColor DarkGray
+while ($true) {
+    $pIn = Read-Host "  Database port [$MySqlPort]"
+    if ([string]::IsNullOrWhiteSpace($pIn)) { break }
+    if ($pIn.Trim() -match '^\d+$' -and [int]$pIn.Trim() -ge 1 -and [int]$pIn.Trim() -le 65535) {
+        $MySqlPort = [int]$pIn.Trim(); break
+    }
+    Fail "Enter a number between 1 and 65535 (or just press Enter for $MySqlPort)"
+}
+Info "Using MySQL port $MySqlPort"
+
+function Read-RootPassword {
+    $secure = Read-Host "  MySQL root password (leave blank if none)" -AsSecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+}
+
+$rootPlain = Read-RootPassword
 
 function Invoke-RootSql($query) {
-    # Pass the password via environment variable so it doesn't appear
-    # in the terminal or process list (unlike -pPASSWORD on the cmd line).
+    # Password goes via environment variable so it doesn't appear in the
+    # terminal or process list (unlike -pPASSWORD on the cmd line).
+    # Output is returned (not discarded); $script:SqlOk says if mysql.exe succeeded.
     $env:MYSQL_PWD = $rootPlain
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
-        & $MySqlExe -u root -e $query 2>&1 | Out-Null
+        $out = & $MySqlExe -u root -P $MySqlPort --protocol=TCP -e $query 2>&1
+        $script:SqlOk = ($LASTEXITCODE -eq 0)
+        return (($out | Out-String).Trim())
     } finally {
+        $ErrorActionPreference = $prevEap
         Remove-Item Env:\MYSQL_PWD -ErrorAction SilentlyContinue
     }
 }
 
-Invoke-RootSql "CREATE DATABASE IF NOT EXISTS acore_world;"
-Invoke-RootSql "CREATE DATABASE IF NOT EXISTS acore_characters;"
-Invoke-RootSql "CREATE DATABASE IF NOT EXISTS acore_auth;"
-Invoke-RootSql "CREATE DATABASE IF NOT EXISTS acore_playerbots;"
-Invoke-RootSql "CREATE USER IF NOT EXISTS 'acore'@'localhost' IDENTIFIED BY '$DbPass';"
-Invoke-RootSql "GRANT ALL PRIVILEGES ON acore_world.* TO 'acore'@'localhost';"
-Invoke-RootSql "GRANT ALL PRIVILEGES ON acore_characters.* TO 'acore'@'localhost';"
-Invoke-RootSql "GRANT ALL PRIVILEGES ON acore_auth.* TO 'acore'@'localhost';"
-Invoke-RootSql "GRANT ALL PRIVILEGES ON acore_playerbots.* TO 'acore'@'localhost';"
-Invoke-RootSql "FLUSH PRIVILEGES;"
-Ok "Databases + user created"
+# Check the root login first - up to 3 tries, asking for port and password again.
+$loginTries = 0
+while ($true) {
+    $res = Invoke-RootSql "SELECT VERSION();"
+    if ($script:SqlOk) {
+        $ver = ($res -split "`r?`n")[-1]
+        Ok "Connected to MySQL on port $MySqlPort (version $ver)"
+        break
+    }
+    Fail "Could not log in to MySQL on port $MySqlPort"
+    Write-Host "  $res" -ForegroundColor DarkGray
+    $loginTries++
+    if ($loginTries -ge 3) {
+        Fail "Giving up - check that MySQL is running, and that the port and root password are right"
+        exit 1
+    }
+    $p = Read-Host "  MySQL port [$MySqlPort]"
+    if ($p -match '^\d+$') { $MySqlPort = [int]$p }
+    $rootPlain = Read-RootPassword
+}
+
+$setupSql = @(
+    "CREATE DATABASE IF NOT EXISTS acore_world;",
+    "CREATE DATABASE IF NOT EXISTS acore_characters;",
+    "CREATE DATABASE IF NOT EXISTS acore_auth;",
+    "CREATE DATABASE IF NOT EXISTS acore_playerbots;",
+    "CREATE USER IF NOT EXISTS 'acore'@'localhost' IDENTIFIED BY '$DbPass';",
+    "GRANT ALL PRIVILEGES ON acore_world.* TO 'acore'@'localhost';",
+    "GRANT ALL PRIVILEGES ON acore_characters.* TO 'acore'@'localhost';",
+    "GRANT ALL PRIVILEGES ON acore_auth.* TO 'acore'@'localhost';",
+    "GRANT ALL PRIVILEGES ON acore_playerbots.* TO 'acore'@'localhost';",
+    "FLUSH PRIVILEGES;"
+)
+$setupFailed = $false
+foreach ($q in $setupSql) {
+    $r = Invoke-RootSql $q
+    if (-not $script:SqlOk) {
+        $setupFailed = $true
+        # Show only the start of the statement and mask the password in the error text.
+        $shown = $q.Substring(0, [Math]::Min(45, $q.Length))
+        Fail "Failed: $shown"
+        Write-Host ("  " + $r.Replace($DbPass, "***")) -ForegroundColor DarkGray
+    }
+}
+if ($setupFailed) {
+    Fail "Database setup failed - see the errors above"
+    exit 1
+}
+Ok "Databases + user created on port $MySqlPort"
 
 # Base schema import - AzerothCore's DBUpdater normally does this automatically
 # on first worldserver/authserver launch, so we don't manually import SQL here.
@@ -344,19 +410,19 @@ Section "Patching Configs"
 $DataDirEscaped = $DataDir -replace '\\','/'
 $LogsDirEscaped = $LogsDir -replace '\\','/'
 
-Set-ConfValue $WorldConf "LoginDatabaseInfo" "`"127.0.0.1;3306;acore;$DbPass;acore_auth`""
-Set-ConfValue $WorldConf "WorldDatabaseInfo" "`"127.0.0.1;3306;acore;$DbPass;acore_world`""
-Set-ConfValue $WorldConf "CharacterDatabaseInfo" "`"127.0.0.1;3306;acore;$DbPass;acore_characters`""
+Set-ConfValue $WorldConf "LoginDatabaseInfo" "`"127.0.0.1;$MySqlPort;acore;$DbPass;acore_auth`""
+Set-ConfValue $WorldConf "WorldDatabaseInfo" "`"127.0.0.1;$MySqlPort;acore;$DbPass;acore_world`""
+Set-ConfValue $WorldConf "CharacterDatabaseInfo" "`"127.0.0.1;$MySqlPort;acore;$DbPass;acore_characters`""
 Set-ConfValue $WorldConf "DataDir" "`"$DataDirEscaped`""
 Set-ConfValue $WorldConf "LogsDir" "`"$LogsDirEscaped`""
 Ok "worldserver.conf patched"
 
-Set-ConfValue $AuthConf "LoginDatabaseInfo" "`"127.0.0.1;3306;acore;$DbPass;acore_auth`""
+Set-ConfValue $AuthConf "LoginDatabaseInfo" "`"127.0.0.1;$MySqlPort;acore;$DbPass;acore_auth`""
 Ok "authserver.conf patched"
 
 # -- Patch playerbots.conf with sea-trialed defaults --------------------------
 if (Test-Path $PlayerbotsConf) {
-    Set-ConfValue $PlayerbotsConf "PlayerbotsDatabaseInfo" "`"127.0.0.1;3306;acore;$DbPass;acore_playerbots`""
+    Set-ConfValue $PlayerbotsConf "PlayerbotsDatabaseInfo" "`"127.0.0.1;$MySqlPort;acore;$DbPass;acore_playerbots`""
     Set-ConfValue $PlayerbotsConf "AiPlayerbot.MinRandomBots" "100"
     Set-ConfValue $PlayerbotsConf "AiPlayerbot.MaxRandomBots" "100"
     Set-ConfValue $PlayerbotsConf "AiPlayerbot.DisabledWithoutRealPlayer" "1"
@@ -387,6 +453,7 @@ $MyCnfContent = @"
 [client]
 user=acore
 password=$DbPass
+port=$MySqlPort
 "@
 Set-Content -Path "$InstallDir\.my.cnf" -Value $MyCnfContent
 Ok "Credentials file written for wotlk-menu.ps1 (Setup/Backup menus)"
