@@ -36,8 +36,45 @@ namespace WotlkMenu
 
     public class MainForm : Form
     {
+        // -- Install location ---------------------------------------------
+        // Default stays C:\Azerothcore. Override order: WOTLK_INSTALL_DIR env
+        // var, then the folder this exe sits in (when worldserver.exe is next
+        // to it), then the default. ResolveBuildDir() mirrors 03-build.ps1.
+        const string DefaultInstallDir = @"C:\Azerothcore";
+
+        static string ResolveInstallDir()
+        {
+            string dir = ResolveInstallDirCore();
+            // Child processes (02-source-patches.ps1, 03-build.ps1, ...) read this
+            // variable, so the menu's folder and the scripts' folder cannot drift apart.
+            try { Environment.SetEnvironmentVariable("WOTLK_INSTALL_DIR", dir); } catch { }
+            return dir;
+        }
+
+        static string ResolveInstallDirCore()
+        {
+            try
+            {
+                string env = Environment.GetEnvironmentVariable("WOTLK_INSTALL_DIR");
+                if (!string.IsNullOrWhiteSpace(env)) return env.Trim().TrimEnd('\\');
+                string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+                if (!string.IsNullOrEmpty(exeDir) && File.Exists(Path.Combine(exeDir, "worldserver.exe")))
+                    return exeDir.TrimEnd('\\');
+            }
+            catch { }
+            return DefaultInstallDir;
+        }
+
+        static string ResolveBuildDir(string installDir)
+        {
+            string env = Environment.GetEnvironmentVariable("WOTLK_BUILD_DIR");
+            if (!string.IsNullOrWhiteSpace(env)) return env.Trim().TrimEnd('\\');
+            if (string.Equals(installDir, DefaultInstallDir, StringComparison.OrdinalIgnoreCase)) return @"C:\Build";
+            return installDir + "-Build";
+        }
+
         // -- Paths (mirror wotlk-menu.ps1) --------------------------------
-        static readonly string InstallDir     = @"C:\Azerothcore";
+        static readonly string InstallDir     = ResolveInstallDir();
         static readonly string ConfigsDir     = InstallDir + @"\configs";
         static readonly string ModulesDir     = ConfigsDir + @"\modules";
         static readonly string PlayerbotsConf = ModulesDir + @"\playerbots.conf";
@@ -52,7 +89,7 @@ namespace WotlkMenu
         static readonly string MyCnfFile      = InstallDir + @"\.my.cnf";
         static readonly string DefaultBackupDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "wotlk-backups");
 
-        static readonly string AcoreSrcDir = @"C:\Azerothcore";
+        static readonly string AcoreSrcDir = InstallDir;
         static readonly string BridgeDir   = AcoreSrcDir + @"\modules\mod-llm-chatter\tools";
         static readonly string BridgePy    = BridgeDir + @"\venv\Scripts\python.exe";
         static readonly string BridgeScript= BridgeDir + @"\llm_chatter_bridge.py";
@@ -96,13 +133,13 @@ namespace WotlkMenu
         static readonly string MariaDataDir  = MariaDir + @"\data";
 
         // Self-update source - adjust if the repo moves
-        const string RawBase = "https://gitea.com/Eldesan/wotlk-windows-launcher/raw/branch/main/";
+        const string RawBase = "https://raw.githubusercontent.com/Nallak/Wotlk-Playerbot-LLmchatter-WIndows-Launcher/main/";
         // Bump this string every time a fix is applied here. If the exe
         // you're running doesn't show this exact tag in its startup log,
         // you're testing a stale build, not the code that was actually
         // changed - that's the first thing to rule out before chasing any
         // more paint-code theories.
-        const string BuildTag = "update-2026-10-04-win-columns-splitter";
+        const string BuildTag = "update-2026-11-12-proper-shutdown";
 
         // -- Theme --------------------------------------------------------
         // -- Theme (2026 navy/gold refresh) --------------------------------
@@ -191,6 +228,7 @@ namespace WotlkMenu
             {
                 Log("[INFO] Ahoy captain! GUI edition reporting for duty.");
                 Log("[INFO] Build marker: " + BuildTag + " - if you don't see this exact tag, you're running a stale exe, not the latest source");
+                Log("[INFO] Install folder: " + InstallDir);
                 EnableDarkTitleBar();
                 if (mysqlExe == null) Log("[WARN] mysql.exe not found (PATH or C:\\Program Files\\MySQL) - DB features disabled");
                 if (!File.Exists(MyCnfFile)) Log("[WARN] " + MyCnfFile + " missing - run 04-setup-database.ps1 for DB features");
@@ -414,7 +452,6 @@ namespace WotlkMenu
             actionRow.AutoSize = true;
             actionRow.Margin = new Padding(0, 34, 0, 0);
             actionRow.Controls.Add(Btn("Start All", AccGreen, delegate { StartAllServices(); }));
-            actionRow.Controls.Add(Btn("Stop All", AccRed, delegate { StopAllServices(); }));
             actionRow.Controls.Add(Btn("Backup Now", AccCyan, delegate { BackupAccount(); }));
             actionsCard.Controls.Add(actionRow);
             actionRow.BringToFront();
@@ -1133,6 +1170,12 @@ namespace WotlkMenu
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool FreeConsole();
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool SetConsoleCtrlHandler(IntPtr handlerRoutine, bool add);
+
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         static extern IntPtr CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode,
             IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlags, IntPtr hTemplateFile);
@@ -1199,6 +1242,41 @@ namespace WotlkMenu
                 finally { CloseHandle(hIn); }
             }
             finally { FreeConsole(); }
+        }
+
+        // Sends Ctrl+C to another process's console - the same signal as
+        // pressing Ctrl+C in its window. authserver has no console commands,
+        // but it shuts itself down properly on this signal.
+        static bool SendCtrlC(int pid)
+        {
+            // While attached to the target's console, this menu must ignore
+            // Ctrl+C so the event we generate below cannot close the menu.
+            // IMPORTANT: that "ignore Ctrl+C" flag is inherited by every
+            // program started afterwards, so it is switched back off again at
+            // the end - otherwise a server started later from this menu would
+            // ignore Ctrl+C and could not be stopped cleanly.
+            SetConsoleCtrlHandler(IntPtr.Zero, true);
+            try
+            {
+                FreeConsole(); // detach from any console we might hold
+                if (!AttachConsole((uint)pid)) return false;
+                try
+                {
+                    return GenerateConsoleCtrlEvent(0, 0); // CTRL_C_EVENT
+                }
+                finally
+                {
+                    System.Threading.Thread.Sleep(300);
+                    FreeConsole();
+                }
+            }
+            finally
+            {
+                // We are detached from the console now, so the event can no
+                // longer reach this process; give it a moment, then restore.
+                System.Threading.Thread.Sleep(200);
+                SetConsoleCtrlHandler(IntPtr.Zero, false);
+            }
         }
 
         Label HeadLabel(string text, Color c)
@@ -1473,8 +1551,92 @@ namespace WotlkMenu
         {
             Process[] ps = Process.GetProcessesByName(procName);
             if (ps.Length == 0) { Log("[WARN] " + label + " not running"); return; }
+
+            // World and auth server: ask them to shut down by themselves first,
+            // so they can save players/bots and close the database properly.
+            // World server gets the console command "server shutdown 1"; auth
+            // server has no console commands, so it gets Ctrl+C. Kill() below
+            // is only the fallback if that does not work or takes too long.
+            if (procName == "worldserver" || procName == "authserver")
+            {
+                bool sent = false;
+                try
+                {
+                    sent = procName == "worldserver"
+                        ? InjectConsoleCommand(ps[0].Id, "server shutdown 1")
+                        : SendCtrlC(ps[0].Id);
+                }
+                catch { }
+                if (sent)
+                {
+                    Log("[INFO] " + label + ": clean shutdown requested - waiting for it to save and exit...");
+                    bool allExited = true;
+                    foreach (Process p in ps)
+                    {
+                        try { if (!p.WaitForExit(30000)) allExited = false; }
+                        catch { allExited = false; }
+                    }
+                    if (allExited)
+                    {
+                        foreach (Process p in ps) p.Dispose();
+                        if (procName == "worldserver")
+                            LogShutdownLines(new string[] { Path.Combine(LogsDir, "Server.log") }, "Server shutdown in", "[SERVER]");
+                        else
+                            LogShutdownLines(new string[] { Path.Combine(InstallDir, "Auth.log"), Path.Combine(LogsDir, "Auth.log") }, "Halting process", "[AUTH]");
+                        Log("[OK] " + label + " stopped cleanly");
+                        return;
+                    }
+                    Log("[WARN] " + label + " did not exit within 30s - forcing it to stop");
+                }
+                else
+                {
+                    Log("[WARN] Could not send the shutdown command - forcing " + label + " to stop");
+                }
+            }
+
             foreach (Process p in ps) { try { p.Kill(); } catch { } p.Dispose(); }
             Log("[OK] " + label + " stopped");
+        }
+
+        // After a clean world/auth server stop: copy the shutdown part of its
+        // log file (from the marker line to the end) into the menu log, so the
+        // save/close-down details are visible here too. If several candidate
+        // files exist, the most recently written one is used.
+        // Reads only the last 64 KB and never throws - purely informational.
+        void LogShutdownLines(string[] files, string marker, string prefix)
+        {
+            try
+            {
+                string slog = null;
+                DateTime best = DateTime.MinValue;
+                foreach (string f in files)
+                {
+                    if (!File.Exists(f)) continue;
+                    DateTime t = File.GetLastWriteTime(f);
+                    if (slog == null || t > best) { slog = f; best = t; }
+                }
+                if (slog == null) return;
+                string tail;
+                using (FileStream fs = new FileStream(slog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    long start = fs.Length > 65536 ? fs.Length - 65536 : 0;
+                    fs.Seek(start, SeekOrigin.Begin);
+                    using (StreamReader sr = new StreamReader(fs)) tail = sr.ReadToEnd();
+                }
+                string[] lines = tail.Replace("\r", "").Split('\n');
+                int first = -1;
+                for (int i = lines.Length - 1; i >= 0; i--)
+                    if (lines[i].Contains(marker)) { first = i; break; }
+                if (first < 0) return;
+                int count = 0;
+                for (int i = first; i < lines.Length && count < 25; i++)
+                {
+                    if (lines[i].Trim().Length == 0) continue;
+                    Log(prefix + " " + lines[i].TrimEnd());
+                    count++;
+                }
+            }
+            catch { }
         }
 
         void OpenLatestLog()
@@ -2001,8 +2163,8 @@ namespace WotlkMenu
                 if (lblBotCurDash != null) { lblBotCurDash.Text = "not configured yet"; lblBotCurDash.ForeColor = Color.Khaki; }
                 return;
             }
-            string max = GetConfValue(PlayerbotsConf, "AiPlayerbot.MaxRandomBots");
-            string idle = GetConfValue(PlayerbotsConf, "AiPlayerbot.DisabledWithoutRealPlayer");
+            string max = GetConfValue(PlayerbotsConf, "Playerbots.MaxRandomBots");
+            string idle = GetConfValue(PlayerbotsConf, "Playerbots.DisabledWithoutRealPlayer");
             bool idleOn = idle == "1";
             string summary = "Current: " + (max != null ? max : "500") + " bots - "
                 + (idleOn ? "only with players" : "always online");
@@ -2023,8 +2185,8 @@ namespace WotlkMenu
             numBots.CommitPendingEdit();
             if (!EnsurePlayerbotsConf()) return;
             string count = ((int)numBots.Value).ToString();
-            SetConfValue(PlayerbotsConf, "AiPlayerbot.MinRandomBots", count);
-            SetConfValue(PlayerbotsConf, "AiPlayerbot.MaxRandomBots", count);
+            SetConfValue(PlayerbotsConf, "Playerbots.MinRandomBots", count);
+            SetConfValue(PlayerbotsConf, "Playerbots.MaxRandomBots", count);
             Log("[OK] Bot count set to " + count);
             Log("[INFO] Restart World server to apply");
             RefreshBotLabels();
@@ -2033,7 +2195,7 @@ namespace WotlkMenu
         void SetBotsOnlyWithPlayers()
         {
             if (!EnsurePlayerbotsConf()) return;
-            SetConfValue(PlayerbotsConf, "AiPlayerbot.DisabledWithoutRealPlayer", "1");
+            SetConfValue(PlayerbotsConf, "Playerbots.DisabledWithoutRealPlayer", "1");
             Log("[OK] Bots now only spawn when real players are online");
             Log("[INFO] Restart World server to apply");
             RefreshBotLabels();
@@ -2042,7 +2204,7 @@ namespace WotlkMenu
         void SetBotsAlwaysOnline()
         {
             if (!EnsurePlayerbotsConf()) return;
-            SetConfValue(PlayerbotsConf, "AiPlayerbot.DisabledWithoutRealPlayer", "0");
+            SetConfValue(PlayerbotsConf, "Playerbots.DisabledWithoutRealPlayer", "0");
             Log("[OK] Bots now ALWAYS online");
             Log("[INFO] Restart World server to apply");
             RefreshBotLabels();
@@ -2051,7 +2213,7 @@ namespace WotlkMenu
         void ShowBotSettings()
         {
             if (!File.Exists(PlayerbotsConf)) { Log("[FAIL] playerbots.conf not found"); return; }
-            Regex rx = new Regex(@"^AiPlayerbot\.(MinRandomBots|MaxRandomBots|DisabledWithoutRealPlayer|DisabledWithoutRealPlayerLoginDelay|DisabledWithoutRealPlayerLogoutDelay)\s*=");
+            Regex rx = new Regex(@"^Playerbots\.(MinRandomBots|MaxRandomBots|DisabledWithoutRealPlayer|DisabledWithoutRealPlayerLoginDelay|DisabledWithoutRealPlayerLogoutDelay)\s*=");
             foreach (string line in File.ReadAllLines(PlayerbotsConf))
                 if (rx.IsMatch(line)) Log("  " + line);
         }
@@ -3611,7 +3773,7 @@ namespace WotlkMenu
         // this if 03-build.ps1 actually uses a different path.
         // Confirmed from an actual build log: 03-build.ps1's cmake build
         // directory is C:\Build, NOT AcoreSrcDir\build as first assumed.
-        const string BuildDir = @"C:\Build";
+        static readonly string BuildDir = ResolveBuildDir(InstallDir);
 
         // Self-healing check run before every build. If a launch of this
         // menu ever ran an OLDER version of EnsureCleanInstallDir() (the
