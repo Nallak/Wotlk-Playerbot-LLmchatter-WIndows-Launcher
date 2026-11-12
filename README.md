@@ -10,6 +10,35 @@ Also hosted on [Gitea](https://gitea.com/Eldesan/wotlk-windows-launcher).
 
 > **Status:** 🟢 Active
 
+
+## Status update – 12 Nov 2026
+
+### New: pick where your server goes ( Credits comatose3788 )
+- The installer now asks **"Install folder [C:\Azerothcore]"**. Press Enter for the default, or type your own path (`-InstallDir` and `WOTLK_INSTALL_DIR` also work).
+- The build folder follows your choice. WOTLK-Menu finds your server folder by itself.
+- Needs a copy of WOTLK-Menu.exe inside the server folder. "Update WOTLK-Menu" puts the new version there.
+
+> **Installing in `C:\Program Files`?** Windows protects that folder. Start WOTLK-Menu **as administrator** the first time (right-click → Run as administrator). It repairs the runtime DLLs and can save settings. After that it isn't needed again, unless you change settings there later. To make it permanent: exe Properties → Compatibility → Run as administrator.
+
+### New: safe shutdown ( credits comatose3788 )
+- **Stop World** now sends the server's own `server shutdown 1`, so characters and bots are saved. The menu shows the server's shutdown lines.
+- **Stop Auth** closes the auth server cleanly.
+- If a server hasn't exited after 30 seconds, the menu forces it to stop.
+- The **Stop All** button is gone.
+
+### Fixed
+- Playerbots settings in the menu ("Set bot count" and the always-online option) now write the real `Playerbots.*` keys. Before, they wrote keys the module ignored.
+- "Update WOTLK-Menu" now pulls from the repo you downloaded it from.
+
+### ✅ Tested
+- Install on an external drive and on the Desktop
+- Install in Program Files (menu run as administrator)
+- Update WOTLK-Menu from Gitea
+- Clean shutdown of the world server and the auth server
+
+---
+
+
 ## ✅ Update (2026-10-03)
 
 - **Builds on the latest Playerbot core again.** After the Playerbot "core-align" merge, the core dropped two helpers that
