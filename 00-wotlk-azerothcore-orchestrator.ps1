@@ -13,14 +13,28 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File 00-wotlk-azerothcore-orchestrator.ps1
 #   powershell -ExecutionPolicy Bypass -File 00-wotlk-azerothcore-orchestrator.ps1 -Force
+#   powershell -ExecutionPolicy Bypass -File 00-wotlk-azerothcore-orchestrator.ps1 -InstallDir "D:\MyServer"
+#
+# Install folder: the orchestrator asks where to install (Enter = C:\Azerothcore).
+# Passing -InstallDir or setting WOTLK_INSTALL_DIR skips the question.
 # =====================================================
 
 param(
-    [switch]$Force
+    [switch]$Force,
+    [string]$InstallDir = ""
 )
 
 $ErrorActionPreference = "Stop"
-$InstallDir = "C:\Azerothcore"
+# Install location: -InstallDir "D:\MyServer" or WOTLK_INSTALL_DIR skip the question.
+# Otherwise the orchestrator asks below (Enter = the default C:\Azerothcore).
+# Every stage runs as a child process and inherits the environment variables set here.
+$DefaultInstallDir = "C:\Azerothcore"
+$InstallDirGiven   = $false
+if ($InstallDir) { $InstallDirGiven = $true }
+elseif ($env:WOTLK_INSTALL_DIR) { $InstallDir = $env:WOTLK_INSTALL_DIR; $InstallDirGiven = $true }
+else { $InstallDir = $DefaultInstallDir }
+$InstallDir = $InstallDir.TrimEnd('\')
+$env:WOTLK_INSTALL_DIR = $InstallDir
 $BaseUrl    = "https://raw.githubusercontent.com/Nallak/Wotlk-Playerbot-LLmchatter-WIndows-Launcher/main"
 $tmpDir     = "$env:TEMP\wotlk-stages-$(Get-Random)"
 $StateFile  = Join-Path $PSScriptRoot ".wotlk-orchestrator-state"
@@ -83,6 +97,46 @@ function Get-FileWithRetry {
     }
 }
 
+# Ask where to install. Enter keeps the default.
+function Read-InstallDir {
+    Write-Host ""
+    Write-Host "  Where do you want to install the server?" -ForegroundColor White
+    Write-Host "  Press Enter for the default: $DefaultInstallDir (recommended - the same layout as the official AzerothCore guide)" -ForegroundColor DarkGray
+    Write-Host "  Or type a full path, for example D:\AzerothCore (a short path without spaces works best)." -ForegroundColor DarkGray
+    Write-Host "  The folder is chosen now because AzerothCore builds its own folder path into the server." -ForegroundColor DarkGray
+    while ($true) {
+        $in = Read-Host "  Install folder [$DefaultInstallDir]"
+        if ([string]::IsNullOrWhiteSpace($in)) { return $DefaultInstallDir }
+        $p = $in.Trim().Trim('"').TrimEnd('\')
+        if ($p -notmatch '^[A-Za-z]:\\.+') {
+            Fail "Enter a full path that starts with a drive letter, like D:\AzerothCore (a drive on its own is not enough)"
+            continue
+        }
+        if ($p -ieq $DefaultInstallDir) { return $DefaultInstallDir }
+        if (-not (Test-Path "$($p.Substring(0,2))\")) {
+            Fail "Drive $($p.Substring(0,2)) not found"
+            continue
+        }
+        # Stage 01 clears a folder that has no AzerothCore clone in it - never point it at someone's files.
+        if ((Test-Path -LiteralPath $p) -and -not (Test-Path -LiteralPath "$p\.git")) {
+            $has = Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($has) {
+                Fail "$p already contains files. Pick a new or empty folder (stage 01 clears a folder that has no AzerothCore clone in it)."
+                continue
+            }
+        }
+        $warns = @()
+        if ($p -match '\s')       { $warns += "the path contains a space (untested - CMake or the build tools may fail)" }
+        if ($p -match 'OneDrive') { $warns += "the path is inside OneDrive (untested - syncing thousands of build files can slow or break the build)" }
+        if ($warns.Count -gt 0) {
+            foreach ($w in $warns) { Warn $w }
+            $yes = Read-Host "  Use it anyway? (y/N)"
+            if ($yes -notmatch '^[Yy]') { continue }
+        }
+        return $p
+    }
+}
+
 Write-Host ""
 Write-Host "  ================================================" -ForegroundColor Red
 Write-Host "   WOTLK AZEROTHCORE ORCHESTRATOR - Pirate Fleet Edition" -ForegroundColor Cyan
@@ -104,8 +158,12 @@ Write-Host ""
 
 # -- Progress state -----------------------------------------------------
 $done = @()
+$savedDir = $null
 if ((Test-Path $StateFile) -and -not $Force) {
-    $done = @(Get-Content $StateFile | Where-Object { $_.Trim() -ne "" })
+    $stateLines = @(Get-Content $StateFile | Where-Object { $_.Trim() -ne "" })
+    $savedLine = $stateLines | Where-Object { $_ -like "InstallDir=*" } | Select-Object -First 1
+    if ($savedLine) { $savedDir = $savedLine.Substring(11).Trim() }
+    $done = @($stateLines | Where-Object { $_ -notlike "InstallDir=*" })
     if ($done.Count -gt 0) { Info "Resuming - already completed: $($done -join ', ')" }
 }
 if ($Force -and (Test-Path $StateFile)) {
@@ -113,6 +171,30 @@ if ($Force -and (Test-Path $StateFile)) {
     $done = @()
     Info "-Force: ignoring saved progress, running everything"
 }
+
+# -- Install folder -----------------------------------------------------
+if ($InstallDirGiven) {
+    Info "Install folder (from -InstallDir / WOTLK_INSTALL_DIR): $InstallDir"
+    if ($savedDir -and ($savedDir -ine $InstallDir)) {
+        Warn "The earlier run used $savedDir - use -Force to start over in the new folder"
+    }
+} elseif ($savedDir) {
+    $InstallDir = $savedDir
+    Info "Resuming with the install folder from the last run: $InstallDir"
+} elseif ($done.Count -gt 0) {
+    Info "Resuming an earlier run - install folder: $InstallDir"
+} else {
+    $InstallDir = Read-InstallDir
+}
+$InstallDir = $InstallDir.TrimEnd('\')
+$env:WOTLK_INSTALL_DIR = $InstallDir
+if (-not $savedDir -or ($savedDir -ine $InstallDir)) {
+    Add-Content -Path $StateFile -Value "InstallDir=$InstallDir"
+}
+$buildShown = if ($env:WOTLK_BUILD_DIR) { $env:WOTLK_BUILD_DIR } elseif ($InstallDir -ieq $DefaultInstallDir) { "C:\Build" } else { "$InstallDir-Build" }
+Info "Server folder: $InstallDir"
+Info "Build folder:  $buildShown"
+Write-Host ""
 
 New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 Info "Working directory: $tmpDir"
