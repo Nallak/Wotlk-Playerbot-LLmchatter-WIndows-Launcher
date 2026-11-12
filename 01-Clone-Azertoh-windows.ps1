@@ -12,7 +12,7 @@ function Warn($msg)  { Write-Host "[WARN] $msg" -ForegroundColor Yellow }
 function Fail($msg)  { Write-Host "[FAIL] $msg" -ForegroundColor Red }
 
 # --- Config ---
-$AcoreDir = "C:\Azerothcore"
+$AcoreDir = if ($env:WOTLK_INSTALL_DIR) { $env:WOTLK_INSTALL_DIR.TrimEnd('\') } else { "C:\Azerothcore" }
 
 Info "TwoLifeCrew WotLK Native Windows Edition - Step 2: Clone"
 Info "Target directory: $AcoreDir"
