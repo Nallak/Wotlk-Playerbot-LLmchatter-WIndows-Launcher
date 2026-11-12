@@ -7,9 +7,13 @@
 # =====================================================
 
 $ErrorActionPreference = "Stop"
-$AcoreDir   = "C:\Azerothcore"
-$BuildDir   = "C:\Build"
-$InstallDir = "C:\Azerothcore"
+$DefaultInstallDir = "C:\Azerothcore"
+# Install location: set WOTLK_INSTALL_DIR to install somewhere else (default C:\Azerothcore).
+# The source is cloned INTO the install folder, so CMake bakes this path into the build.
+$AcoreDir   = if ($env:WOTLK_INSTALL_DIR) { $env:WOTLK_INSTALL_DIR.TrimEnd('\') } else { "C:\Azerothcore" }
+$InstallDir = $AcoreDir
+# Build folder: WOTLK_BUILD_DIR wins; default install keeps C:\Build; a custom install gets "<install>-Build".
+$BuildDir   = if ($env:WOTLK_BUILD_DIR) { $env:WOTLK_BUILD_DIR.TrimEnd('\') } elseif ($AcoreDir -ieq $DefaultInstallDir) { "C:\Build" } else { "$AcoreDir-Build" }
 
 function Info($msg)  { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 function Ok($msg)    { Write-Host "[OK]   $msg" -ForegroundColor Green }
@@ -256,11 +260,24 @@ Ok "Installed to $InstallDir"
 # --- Copy required DLLs (per AzerothCore wiki) ----------------------------------------------------------
 Write-Host ""
 Info "Copying required DLLs..."
-$binDir = "$InstallDir\bin"
-if (-not (Test-Path $binDir)) {
-    Warn "Expected bin directory not found at $binDir - checking alternate location..."
+# The DLLs must sit in the same folder as worldserver.exe (Windows only looks
+# next to the exe). INSTALL always creates a bin\ folder for AzerothCore's own
+# helper scripts, so "bin exists" does not mean the exe is in it - check where
+# worldserver.exe really is.
+if (Test-Path "$InstallDir\worldserver.exe") {
     $binDir = $InstallDir
+} elseif (Test-Path "$InstallDir\bin\worldserver.exe") {
+    $binDir = "$InstallDir\bin"
+} else {
+    $foundExe = Get-ChildItem -Path $InstallDir -Filter "worldserver.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($foundExe) {
+        $binDir = $foundExe.DirectoryName
+    } else {
+        Warn "worldserver.exe not found under $InstallDir - copying the DLLs into $InstallDir anyway"
+        $binDir = $InstallDir
+    }
 }
+Info "Copying DLLs next to worldserver.exe: $binDir"
 
 $mysqlDll = "$($mysqlBase.FullName)\lib\libmysql.dll"
 if (Test-Path $mysqlDll) {
@@ -279,6 +296,17 @@ foreach ($dll in $opensslDlls) {
 }
 if ($opensslDlls.Count -eq 0) {
     Warn "No OpenSSL DLLs found at $opensslRoot\bin - copy libssl/libcrypto DLLs manually"
+}
+
+# worldserver.exe / authserver.exe also check that OpenSSL's legacy provider
+# (legacy.dll) sits next to them and stop with an ASSERTION FAILED if it is missing.
+# It does not match lib*-x64.dll above, so it is copied separately.
+$legacyDll = Get-ChildItem -Path $opensslRoot -Filter "legacy.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($legacyDll) {
+    Copy-Item $legacyDll.FullName -Destination $binDir -Force
+    Ok "Copied legacy.dll"
+} else {
+    Warn "legacy.dll not found under $opensslRoot - copy it next to worldserver.exe manually"
 }
 
 Write-Host ""
