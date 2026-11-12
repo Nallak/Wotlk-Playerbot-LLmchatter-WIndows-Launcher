@@ -53,7 +53,7 @@ if (-not (Test-Path $icon)) {
     Write-Host "[INFO] wowmenu.ico not found - downloading from the fleet..." -ForegroundColor Cyan
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $iconUrl = "https://gitea.com/Eldesan/wotlk-windows-launcher/raw/branch/main/wowmenu.ico/wowmenu.ico"
+        $iconUrl = "https://raw.githubusercontent.com/Nallak/Wotlk-Playerbot-LLmchatter-WIndows-Launcher/main/wowmenu.ico"
         Invoke-WebRequest -Uri $iconUrl -OutFile $icon -UseBasicParsing -UserAgent "Mozilla/5.0"
         Write-Host "[OK] Downloaded wowmenu.ico" -ForegroundColor Green
     } catch {
