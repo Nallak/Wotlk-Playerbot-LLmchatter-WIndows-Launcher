@@ -11,7 +11,7 @@ $Host.UI.RawUI.BackgroundColor = "Black"
 $Host.UI.RawUI.ForegroundColor = "Gray"
 try { Clear-Host } catch { }
 
-$InstallDir     = "C:\Azerothcore"
+$InstallDir     = if ($env:WOTLK_INSTALL_DIR) { $env:WOTLK_INSTALL_DIR.TrimEnd('\') } else { "C:\Azerothcore" }
 $ConfigsDir     = "$InstallDir\configs"
 $ModulesDir     = "$ConfigsDir\modules"
 $DataDir        = "$InstallDir\data"
@@ -423,11 +423,11 @@ Ok "authserver.conf patched"
 # -- Patch playerbots.conf with sea-trialed defaults --------------------------
 if (Test-Path $PlayerbotsConf) {
     Set-ConfValue $PlayerbotsConf "PlayerbotsDatabaseInfo" "`"127.0.0.1;$MySqlPort;acore;$DbPass;acore_playerbots`""
-    Set-ConfValue $PlayerbotsConf "AiPlayerbot.MinRandomBots" "100"
-    Set-ConfValue $PlayerbotsConf "AiPlayerbot.MaxRandomBots" "100"
-    Set-ConfValue $PlayerbotsConf "AiPlayerbot.DisabledWithoutRealPlayer" "1"
-    Set-ConfValue $PlayerbotsConf "AiPlayerbot.EnableBroadcasts" "0"
-    Set-ConfValue $PlayerbotsConf "AiPlayerbot.RandomBotAutologin" "1"
+    Set-ConfValue $PlayerbotsConf "Playerbots.MinRandomBots" "100"
+    Set-ConfValue $PlayerbotsConf "Playerbots.MaxRandomBots" "100"
+    Set-ConfValue $PlayerbotsConf "Playerbots.DisabledWithoutRealPlayer" "1"
+    Set-ConfValue $PlayerbotsConf "Playerbots.EnableBroadcasts" "0"
+    Set-ConfValue $PlayerbotsConf "Playerbots.RandomBotAutologin" "1"
     Ok "playerbots.conf configured - 100 bots, idle when no players online"
 } else {
     Warn "playerbots.conf not found - skipping"
