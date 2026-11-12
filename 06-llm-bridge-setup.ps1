@@ -4,7 +4,7 @@
 # Run as Administrator (or as your normal user - no admin needed here) #
 # =====================================================================#
 $ErrorActionPreference = "Stop"
-$InstallDir = "C:\Azerothcore"
+$InstallDir = if ($env:WOTLK_INSTALL_DIR) { $env:WOTLK_INSTALL_DIR.TrimEnd('\') } else { "C:\Azerothcore" }
 $ModuleZipUrl = "https://raw.githubusercontent.com/Nallak/Wotlk-Playerbot-LLmchatter-WIndows-Launcher/main/mod-llm-chatter/mod-llm-chatter.zip"
 $BridgeDir = "$InstallDir\modules\mod-llm-chatter\tools"
 
