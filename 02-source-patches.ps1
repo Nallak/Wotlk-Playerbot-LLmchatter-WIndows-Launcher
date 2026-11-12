@@ -5,7 +5,7 @@
 # =====================================================
 
 $ErrorActionPreference = "Stop"
-$AcoreDir = "C:\Azerothcore"
+$AcoreDir = if ($env:WOTLK_INSTALL_DIR) { $env:WOTLK_INSTALL_DIR.TrimEnd('\') } else { "C:\Azerothcore" }
 
 function Info($msg)  { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
 function Ok($msg)    { Write-Host "[OK]   $msg" -ForegroundColor Green }
