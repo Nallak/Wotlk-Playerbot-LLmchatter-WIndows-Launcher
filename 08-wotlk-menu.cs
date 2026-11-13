@@ -133,13 +133,13 @@ namespace WotlkMenu
         static readonly string MariaDataDir  = MariaDir + @"\data";
 
         // Self-update source - adjust if the repo moves
-        const string RawBase = "https://raw.githubusercontent.com/Nallak/Wotlk-Playerbot-LLmchatter-WIndows-Launcher/main/";
+        const string RawBase = "https://gitea.com/Eldesan/wotlk-windows-launcher/raw/branch/main/";
         // Bump this string every time a fix is applied here. If the exe
         // you're running doesn't show this exact tag in its startup log,
         // you're testing a stale build, not the code that was actually
         // changed - that's the first thing to rule out before chasing any
         // more paint-code theories.
-        const string BuildTag = "update-2026-11-12-proper-shutdown";
+        const string BuildTag = "update-2026-11-13-bridge-last";
 
         // -- Theme --------------------------------------------------------
         // -- Theme (2026 navy/gold refresh) --------------------------------
@@ -198,7 +198,7 @@ namespace WotlkMenu
             installLLM = File.Exists(LlmConf);
             mysqlExe = FindMySql();
 
-            Text = "WOTLK Server Manager \u2620 Pirate Fleet Edition";
+            Text = "WOTLK Server Manager";
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(920, 660);
             MinimumSize = new Size(820, 560);
@@ -226,7 +226,7 @@ namespace WotlkMenu
 
             Shown += delegate
             {
-                Log("[INFO] Ahoy captain! GUI edition reporting for duty.");
+                Log("[INFO] WOTLK Server Manager started.");
                 Log("[INFO] Build marker: " + BuildTag + " - if you don't see this exact tag, you're running a stale exe, not the latest source");
                 Log("[INFO] Install folder: " + InstallDir);
                 EnableDarkTitleBar();
@@ -244,24 +244,6 @@ namespace WotlkMenu
         }
 
         // ============================ UI BUILD ========================
-        // Output box height: about double the old 150 px, a bit more on big
-        // windows (about 45% of the window, capped at 400), never below 150.
-        // Measured in 96-dpi units and scaled, so it looks the same on any DPI.
-        // Drag the handle above the box to resize it yourself; once dragged
-        // the auto-size stops. Double-click the handle to go back to auto.
-        bool logUserSized;
-
-        void AdjustLogHeight()
-        {
-            if (txtOut == null || logUserSized) return;
-            float k = 1f;
-            try { using (Graphics g = CreateGraphics()) k = g.DpiX / 96f; } catch { }
-            if (k < 0.5f) k = 1f;
-            double clientLogical = ClientSize.Height / k;
-            int h = (int)(Math.Max(150.0, Math.Min(400.0, clientLogical * 0.45)) * k);
-            if (txtOut.Height != h) txtOut.Height = h;
-        }
-
         void BuildUi()
         {
             BackColor = BgDark;
@@ -272,7 +254,7 @@ namespace WotlkMenu
             txtOut.ReadOnly = true;
             txtOut.ScrollBars = ScrollBars.Vertical;
             txtOut.Dock = DockStyle.Bottom;
-            txtOut.Height = 300;
+            txtOut.Height = 150;
             txtOut.BackColor = Color.FromArgb(12, 14, 20);
             txtOut.ForeColor = AccCyan;
             txtOut.Font = new Font("Consolas", 9F);
@@ -362,23 +344,9 @@ namespace WotlkMenu
 
             if (sectionPanels.Count > 0) ShowSection(0);
 
-            // Drag handle between the pages and the output box. Add order
-            // matters: the splitter has to be docked right after txtOut.
-            Splitter logSplit = new Splitter();
-            logSplit.Dock = DockStyle.Bottom;
-            logSplit.Height = 7;
-            logSplit.BackColor = BorderCol;
-            logSplit.MinSize = 80;
-            logSplit.MinExtra = 220;
-            logSplit.SplitterMoved += delegate { logUserSized = true; };
-            logSplit.DoubleClick += delegate { logUserSized = false; AdjustLogHeight(); };
-
             Controls.Add(content);
             Controls.Add(sidebar);
-            Controls.Add(logSplit);
             Controls.Add(txtOut);
-            Resize += delegate { AdjustLogHeight(); };
-            AdjustLogHeight();
         }
 
         // Registers one sidebar entry + its section panel, wiring the
@@ -452,6 +420,7 @@ namespace WotlkMenu
             actionRow.AutoSize = true;
             actionRow.Margin = new Padding(0, 34, 0, 0);
             actionRow.Controls.Add(Btn("Start All", AccGreen, delegate { StartAllServices(); }));
+            actionRow.Controls.Add(Btn("Stop All", AccRed, delegate { StopAllServices(); }));
             actionRow.Controls.Add(Btn("Backup Now", AccCyan, delegate { BackupAccount(); }));
             actionsCard.Controls.Add(actionRow);
             actionRow.BringToFront();
@@ -672,24 +641,85 @@ namespace WotlkMenu
 
         void StartAllServices()
         {
-            Log("[INFO] Starting all services...");
+            Log("[INFO] Starting all services in order: Auth -> World -> LLM chatter...");
             if (File.Exists(MariaDbd)) StartMaria();
-            StartServer(WorldExe, "worldserver", "World server");
             StartServer(AuthExe, "authserver", "Auth server");
-            if (installLLM)
+            bool withLlm = installLLM;
+            // World's port comes from worldserver.conf (default 8085).
+            int worldPort = 8085;
+            try
             {
-                StartOllama();
-                StartBridge();
+                string wp = File.Exists(WorldConf) ? GetConfValue(WorldConf, "WorldServerPort") : null;
+                int parsed;
+                if (!string.IsNullOrEmpty(wp) && int.TryParse(wp.Trim(), out parsed)) worldPort = parsed;
             }
+            catch { }
+            // Waiting happens on a background thread so the GUI never freezes.
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Thread.Sleep(5000);
+                SafeInvoke(delegate { StartServer(WorldExe, "worldserver", "World server"); });
+                // World only opens its port once it has fully loaded (up to ~5 min).
+                bool up = false;
+                for (int i = 0; i < 150 && !up; i++)
+                {
+                    up = IsPortOpen(worldPort);
+                    if (!up) Thread.Sleep(2000);
+                }
+                if (!up)
+                {
+                    SafeInvoke(delegate { Log("[WARN] World server did not open port " + worldPort + " within 5 minutes - LLM chatter NOT started"); });
+                    return;
+                }
+                SafeInvoke(delegate
+                {
+                    Log("[OK] World server is up");
+                    if (withLlm)
+                    {
+                        Log("[INFO] Starting LLM chatter...");
+                        StartOllama();
+                        StartBridge();
+                    }
+                });
+            });
         }
 
         void StopAllServices()
         {
-            Log("[INFO] Stopping all services...");
-            if (installLLM) StopBridge();
-            StopByName("worldserver", "World server");
-            StopByName("authserver", "Auth server");
+            if (stopAllBusy) { Log("[WARN] Stop All is already running"); return; }
+            stopAllBusy = true;
+            try
+            {
+                Log("[INFO] Stopping all services in order: World -> Auth -> LLM chatter...");
+                // World first: clean shutdown with countdown, waits until it has exited.
+                bool worldWasRunning = IsRunning("worldserver");
+                StopByName("worldserver", "World server");
+                // Short pause before Auth so it does not feel like slam-shut.
+                if (worldWasRunning && IsRunning("authserver"))
+                {
+                    Log("[INFO] Pausing 2 seconds before Auth...");
+                    for (int i = 0; i < 4; i++)
+                    {
+                        Application.DoEvents();
+                        Thread.Sleep(500);
+                    }
+                }
+                StopByName("authserver", "Auth server");
+                // LLM chatter goes last: bridge first, then Ollama it depends on.
+                if (installLLM)
+                {
+                    StopBridge();
+                    StopOllama();
+                }
+            }
+            finally
+            {
+                stopAllBusy = false;
+                RefreshStatus();
+            }
         }
+
+        bool stopAllBusy;   // blocks a second Stop All click while one is running
 
         // Refreshes dashboard-specific labels not already covered by the
         // regular RefreshStatus()/RefreshBotLabels() calls.
@@ -788,46 +818,10 @@ namespace WotlkMenu
             return p;
         }
 
-        // Two side-by-side columns inside a tab's flow.
-        void TwoColumns(FlowLayoutPanel f, out FlowLayoutPanel left, out FlowLayoutPanel right)
-        {
-            FlowLayoutPanel columns = new FlowLayoutPanel();
-            columns.FlowDirection = FlowDirection.LeftToRight;
-            columns.WrapContents = false;
-            columns.AutoSize = true;
-            columns.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            columns.Margin = new Padding(0);
-            columns.BackColor = BgPanel;
-            f.Controls.Add(columns);
-
-            left = new FlowLayoutPanel();
-            left.FlowDirection = FlowDirection.TopDown;
-            left.WrapContents = false;
-            left.AutoSize = true;
-            left.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            left.Margin = new Padding(0, 0, 16, 0);
-            left.BackColor = BgPanel;
-            columns.Controls.Add(left);
-
-            right = new FlowLayoutPanel();
-            right.FlowDirection = FlowDirection.TopDown;
-            right.WrapContents = false;
-            right.AutoSize = true;
-            right.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            right.Margin = new Padding(0);
-            right.BackColor = BgPanel;
-            columns.Controls.Add(right);
-        }
-
         Panel BuildLlmTab()
         {
             FlowLayoutPanel f;
             Panel p = NewTab("LLM Bridge", out f);
-
-            // Two columns: AI model + chatter tuning on the left,
-            // Ollama + bridge controls on the right.
-            FlowLayoutPanel colL, colR;
-            TwoColumns(f, out colL, out colR);
 
             // -- AI MODEL (pick installed, or pull new) ----------------------
             // Ollama itself is installed system-wide by stage 05. The picker
@@ -856,7 +850,7 @@ namespace WotlkMenu
             Label modelHint = HeadLabel("New model? Type its name and Pull. Examples: mistral-nemo:12b | HammerAI/mn-mag-mell-r1 | llama3.2:3b", AccGray);
             modelHint.Font = new Font("Segoe UI", 8.25F);
 
-            colL.Controls.Add(SectionCard("AI MODEL",
+            f.Controls.Add(SectionCard("AI MODEL",
                 Row(cmbInstalledModels,
                     Btn("Refresh list", AccCyan, delegate { RefreshInstalledModels(); }),
                     Btn("Check current model", AccCyan, delegate { ReportAiStatus(); }),
@@ -887,7 +881,7 @@ namespace WotlkMenu
             Label tuningRestartHint = HeadLabel("Restart LLM bridge after any change for it to take effect.", AccGray);
             tuningRestartHint.Font = new Font("Segoe UI", 8.25F);
 
-            colL.Controls.Add(SectionCard("CHATTER TUNING",
+            f.Controls.Add(SectionCard("CHATTER TUNING",
                 lblChatterTuning,
                 Row(
                     Btn("Default (shipped)", AccGray, delegate { ApplyChatterPreset(false); }),
@@ -902,13 +896,13 @@ namespace WotlkMenu
                 Row(Btn("Save Custom Values", AccGreen, delegate { SaveChatterTuning(); })),
                 tuningRestartHint));
 
-            colR.Controls.Add(SectionCard("OLLAMA",
+            f.Controls.Add(SectionCard("OLLAMA",
                 Row(
                     Btn("Start Ollama", AccGreen, delegate { StartOllama(); }),
                     Btn("Stop Ollama", AccRed, delegate { StopOllama(); }),
                     Btn("List models", AccCyan, delegate { ListModels(); }))));
 
-            colR.Controls.Add(SectionCard("BRIDGE",
+            f.Controls.Add(SectionCard("BRIDGE",
                 Row(
                     Btn("Start LLM bridge", AccGreen, delegate { StartBridge(); }),
                     Btn("Stop LLM bridge", AccRed, delegate { StopBridge(); }),
@@ -1397,6 +1391,32 @@ namespace WotlkMenu
         // launches mariadbd with output captured, checks the data dir is
         // initialized, watches for the port to come up, and reports the
         // real error in the GUI log if anything goes wrong.
+        // Database port chosen during install (stage 04 writes port= into .my.cnf).
+        // Falls back to 3306 if the file or the line is missing.
+        static int DbPort()
+        {
+            try
+            {
+                if (File.Exists(MyCnfFile))
+                {
+                    foreach (string raw in File.ReadAllLines(MyCnfFile))
+                    {
+                        string ln = raw.Trim();
+                        if (ln.StartsWith("port", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int eq = ln.IndexOf('=');
+                            int v;
+                            if (eq > 0 && ln.Substring(0, eq).Trim().Equals("port", StringComparison.OrdinalIgnoreCase)
+                                && int.TryParse(ln.Substring(eq + 1).Trim(), out v) && v >= 1 && v <= 65535)
+                                return v;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return 3306;
+        }
+
         static bool IsPortOpen(int port)
         {
             try
@@ -1415,9 +1435,9 @@ namespace WotlkMenu
         void StartMaria()
         {
             if (!File.Exists(MariaDbd)) { Log("[FAIL] Portable MariaDB not found at " + MariaDbd); return; }
-            if (IsRunning("mariadbd") || IsPortOpen(3306))
+            if (IsRunning("mariadbd") || IsPortOpen(DbPort()))
             {
-                Log("[WARN] A database is already running on port 3306");
+                Log("[WARN] A database is already running on port " + DbPort());
                 Log("[INFO] If that's the system MySQL, stop its service first to avoid a clash");
                 RefreshStatus();
                 return;
@@ -1438,7 +1458,7 @@ namespace WotlkMenu
                 // stream; we redirect + drain them into the GUI log so a bad
                 // start shows a reason instead of a black window.
                 string iniArg = File.Exists(MariaIni) ? "--defaults-file=\"" + MariaIni + "\" " : "";
-                psi.Arguments = iniArg + "--datadir=\"" + MariaDataDir + "\" --console";
+                psi.Arguments = iniArg + "--datadir=\"" + MariaDataDir + "\" --port=" + DbPort() + " --console";
                 psi.WorkingDirectory = MariaBin;
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
@@ -1472,9 +1492,9 @@ namespace WotlkMenu
                     for (int i = 0; i < 15; i++)
                     {
                         Thread.Sleep(1000);
-                        if (IsPortOpen(3306))
+                        if (IsPortOpen(DbPort()))
                         {
-                            SafeInvoke(delegate { Log("[OK] MariaDB is up on 127.0.0.1:3306"); RefreshStatus(); });
+                            SafeInvoke(delegate { Log("[OK] MariaDB is up on 127.0.0.1:" + DbPort()); RefreshStatus(); });
                             return;
                         }
                         if (p.HasExited)
@@ -1483,7 +1503,7 @@ namespace WotlkMenu
                             return;
                         }
                     }
-                    SafeInvoke(delegate { Log("[WARN] MariaDB started but port 3306 not open yet - check the lines above"); RefreshStatus(); });
+                    SafeInvoke(delegate { Log("[WARN] MariaDB started but port " + DbPort() + " not open yet - check the lines above"); RefreshStatus(); });
                 });
             }
             catch (Exception ex)
@@ -1494,7 +1514,7 @@ namespace WotlkMenu
 
         void StopMaria()
         {
-            if (!IsRunning("mariadbd") && !IsPortOpen(3306)) { Log("[WARN] MariaDB not running"); return; }
+            if (!IsRunning("mariadbd") && !IsPortOpen(DbPort())) { Log("[WARN] MariaDB not running"); return; }
             Log("[INFO] Stopping MariaDB...");
             // Prefer a clean shutdown via mariadb-admin so InnoDB flushes.
             bool clean = false;
@@ -1504,7 +1524,7 @@ namespace WotlkMenu
                 {
                     ProcessStartInfo psi = new ProcessStartInfo(MariaAdmin);
                     string iniArg = File.Exists(MariaIni) ? "--defaults-file=\"" + MariaIni + "\" " : "";
-                    psi.Arguments = iniArg + "-u root shutdown";
+                    psi.Arguments = iniArg + "-u root -P " + DbPort() + " --protocol=TCP shutdown";
                     psi.WorkingDirectory = MariaBin;
                     psi.UseShellExecute = false;
                     psi.CreateNoWindow = true;
@@ -1521,7 +1541,7 @@ namespace WotlkMenu
                 catch { clean = false; }
             }
             // Give it a moment; if still up, hard-kill as a fallback.
-            for (int i = 0; i < 5 && (IsRunning("mariadbd") || IsPortOpen(3306)); i++) Thread.Sleep(600);
+            for (int i = 0; i < 5 && (IsRunning("mariadbd") || IsPortOpen(DbPort())); i++) Thread.Sleep(600);
             if (IsRunning("mariadbd"))
             {
                 Process[] ps = Process.GetProcessesByName("mariadbd");
@@ -1547,6 +1567,19 @@ namespace WotlkMenu
             Log("[OK] " + label + " starting in its own window!");
         }
 
+        // Logs 1..n, one number per second. Repaints between numbers because
+        // StopByName runs on the GUI thread - without DoEvents the whole
+        // countdown would only appear at once after the last second.
+        void CountdownLog(int seconds)
+        {
+            for (int i = 1; i <= seconds; i++)
+            {
+                Log("  " + i);
+                Application.DoEvents();
+                Thread.Sleep(1000);
+            }
+        }
+
         void StopByName(string procName, string label)
         {
             Process[] ps = Process.GetProcessesByName(procName);
@@ -1554,21 +1587,33 @@ namespace WotlkMenu
 
             // World and auth server: ask them to shut down by themselves first,
             // so they can save players/bots and close the database properly.
-            // World server gets the console command "server shutdown 1"; auth
+            // World server gets the console command "server shutdown 5" (5 s countdown); auth
             // server has no console commands, so it gets Ctrl+C. Kill() below
             // is only the fallback if that does not work or takes too long.
             if (procName == "worldserver" || procName == "authserver")
             {
+                // Auth has nothing to save and would exit instantly, so give it
+                // the same visible 5 second countdown World gets.
+                if (procName == "authserver")
+                {
+                    Log("[INFO] " + label + ": stopping in 5 seconds...");
+                    CountdownLog(5);
+                }
                 bool sent = false;
                 try
                 {
                     sent = procName == "worldserver"
-                        ? InjectConsoleCommand(ps[0].Id, "server shutdown 1")
+                        ? InjectConsoleCommand(ps[0].Id, "server shutdown 5")
                         : SendCtrlC(ps[0].Id);
                 }
                 catch { }
                 if (sent)
                 {
+                    if (procName == "worldserver")
+                    {
+                        Log("[INFO] " + label + ": shutting down in 5 seconds...");
+                        CountdownLog(5);
+                    }
                     Log("[INFO] " + label + ": clean shutdown requested - waiting for it to save and exit...");
                     bool allExited = true;
                     foreach (Process p in ps)
@@ -2134,10 +2179,29 @@ namespace WotlkMenu
         {
             Process p = GetBridgeProcess();
             if (p == null) { Log("[WARN] LLM bridge not running"); return; }
-            try { p.Kill(); } catch { }
+            // Same visible 5 second countdown World and Auth get.
+            Log("[INFO] LLM bridge: stopping in 5 seconds...");
+            CountdownLog(5);
+            // Ask it to stop by itself first (Ctrl+C in its own window, same
+            // signal as pressing it there) so it can finish what it is doing.
+            // Kill() is only the fallback if that fails or takes too long.
+            bool sent = false;
+            try { sent = SendCtrlC(p.Id); } catch { }
+            bool exited = false;
+            if (sent)
+            {
+                Log("[INFO] LLM bridge: clean shutdown requested - waiting for it to finish...");
+                try { exited = p.WaitForExit(15000); } catch { }
+            }
+            if (!exited)
+            {
+                Log(sent ? "[WARN] LLM bridge did not exit within 15s - forcing it to stop"
+                         : "[WARN] Could not send Ctrl+C to the LLM bridge - forcing it to stop");
+                try { p.Kill(); } catch { }
+            }
             p.Dispose();
             try { File.Delete(BridgePid); } catch { }
-            Log("[OK] LLM bridge stopped");
+            Log(exited ? "[OK] LLM bridge stopped cleanly" : "[OK] LLM bridge stopped");
         }
 
         // ============================ BOTS ============================
@@ -3191,9 +3255,8 @@ namespace WotlkMenu
             FlowLayoutPanel f;
             Panel p = NewTab("Modules & Data", out f);
 
-            // Two columns: left holds Core/Add, right holds Installed modules
-            // with the Build card below it, so a long build isn't buried at
-            // the bottom of one long scroll.
+            // Two columns: left holds Core/Add/Installed, right holds Build,
+            // so a long build isn't buried at the bottom of one long scroll.
             FlowLayoutPanel columns = new FlowLayoutPanel();
             columns.FlowDirection = FlowDirection.LeftToRight;
             columns.WrapContents = false;
@@ -3269,7 +3332,7 @@ namespace WotlkMenu
             lstModules.BorderStyle = BorderStyle.FixedSingle;
             lstModules.Margin = new Padding(0, 8, 0, 8);
 
-            right.Controls.Add(SectionCard("INSTALLED MODULES",
+            left.Controls.Add(SectionCard("INSTALLED MODULES",
                 Row(
                     Btn("Refresh list", AccCyan, delegate { RefreshModuleList(); }),
                     Btn("Update selected (pull only)", AccCyan, delegate { UpdateSelectedModule(); }),
@@ -3845,63 +3908,23 @@ namespace WotlkMenu
         void RunSourcePatchesScript()
         {
             string script = Path.Combine(ScriptsDir, "02-source-patches.ps1");
-            // Always refresh from the repo first, not only when the file is
-            // missing - see RefreshScriptFromHost() for why and how it stays safe.
-            if (!RefreshScriptFromHost("02-source-patches.ps1", script))
+            if (!File.Exists(script))
             {
-                SafeInvoke(delegate { Log("[WARN] No 02-source-patches.ps1 available - skipping source-compat patches for this build"); });
-                return;
+                SafeInvoke(delegate { Log("[WARN] 02-source-patches.ps1 not found at: " + script + " - downloading a fresh copy from Gitea..."); });
+                try { Directory.CreateDirectory(ScriptsDir); } catch { }
+                int dlCode = RunCurlDownload(RawBase + "02-source-patches.ps1", script);
+                if (dlCode != 0 || !File.Exists(script))
+                {
+                    SafeInvoke(delegate { Log("[WARN] Could not download 02-source-patches.ps1 (curl exit " + dlCode + ") - skipping source-compat patches for this build"); });
+                    return;
+                }
+                SafeInvoke(delegate { Log("[OK] Downloaded 02-source-patches.ps1"); });
             }
             SafeInvoke(delegate { Log("[INFO] Applying known source-compat patches (02-source-patches.ps1)..."); });
             int code = RunStreamed("powershell",
                 "-NoProfile -ExecutionPolicy Bypass -File \"" + script + "\"", ScriptsDir);
             if (code != 0)
                 SafeInvoke(delegate { Log("[WARN] Source-compat patch script exited with code " + code + " - check the log above, continuing to build anyway"); });
-        }
-
-        // Refreshes one companion script (02 / 03) from the repo right before it
-        // is used, so a stale local copy can never be run by mistake. The menu
-        // used to download only when the file was MISSING, which let an old
-        // 02-source-patches.ps1 keep running long after the repo moved on.
-        // Safe order: download to "<file>.new" first, and only when that worked
-        // (curl ok and the file is not empty) copy it over the local one. If the
-        // download fails (host down, offline) the existing copy is kept and a
-        // warning is logged, so a bad day on the host never leaves the user with
-        // NO script. Returns true when a usable local copy exists afterwards.
-        bool RefreshScriptFromHost(string fileName, string localPath)
-        {
-            try { Directory.CreateDirectory(Path.GetDirectoryName(localPath)); } catch { }
-            string tmp = localPath + ".new";
-            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
-
-            int dlCode = RunCurlDownload(RawBase + fileName, tmp);
-            bool fresh = false;
-            try { fresh = dlCode == 0 && File.Exists(tmp) && new FileInfo(tmp).Length > 0; } catch { }
-
-            if (fresh)
-            {
-                try
-                {
-                    File.Copy(tmp, localPath, true);
-                    SafeInvoke(delegate { Log("[OK] " + fileName + " refreshed from the repo"); });
-                }
-                catch (Exception ex)
-                {
-                    string why = ex.Message;
-                    SafeInvoke(delegate { Log("[WARN] Could not replace " + fileName + " (" + why + ") - using the existing copy"); });
-                }
-            }
-            else if (File.Exists(localPath))
-            {
-                SafeInvoke(delegate { Log("[WARN] Could not download " + fileName + " (curl exit " + dlCode + ") - using the existing local copy, which may be out of date"); });
-            }
-            else
-            {
-                SafeInvoke(delegate { Log("[WARN] Could not download " + fileName + " (curl exit " + dlCode + ") and no local copy exists"); });
-            }
-
-            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
-            return File.Exists(localPath);
         }
 
         void RunBuildScript(bool clean)
@@ -3923,16 +3946,19 @@ namespace WotlkMenu
                     // same Gitea raw source UpdateFromGitea() already uses,
                     // via the same proven curl path (RunCurlDownload) -
                     // before any build work starts.
-                    // Refreshed on every build (not only when missing) so the
-                    // build script is never stale; if the download fails the
-                    // existing copy is used - see RefreshScriptFromHost().
-                    if (!RefreshScriptFromHost("03-build.ps1", script))
+                    if (!File.Exists(script))
                     {
-                        SafeInvoke(delegate
+                        SafeInvoke(delegate { Log("[WARN] 03-build.ps1 not found next to the exe at: " + script + " - downloading a fresh copy from Gitea..."); });
+                        int dlCode = RunCurlDownload(RawBase + "03-build.ps1", script);
+                        if (dlCode != 0 || !File.Exists(script))
                         {
-                            Log("[FAIL] 03-build.ps1 is missing and could not be downloaded - copy it from your install scripts folder into the same folder as WOTLK-Menu.exe");
-                        });
-                        return;
+                            SafeInvoke(delegate
+                            {
+                                Log("[FAIL] Could not download 03-build.ps1 (curl exit " + dlCode + ") - copy it from your install scripts folder into the same folder as WOTLK-Menu.exe");
+                            });
+                            return;
+                        }
+                        SafeInvoke(delegate { Log("[OK] Downloaded 03-build.ps1 - continuing build..."); });
                     }
 
                     EnsureCoreSourceFilesRestored();
