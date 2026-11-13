@@ -139,7 +139,10 @@ namespace WotlkMenu
         // you're testing a stale build, not the code that was actually
         // changed - that's the first thing to rule out before chasing any
         // more paint-code theories.
-        const string BuildTag = "update-2026-11-13-bridge-last";
+        // Credits: the start order (Auth first, pause, World last) and the
+        // clean shutdown order (World first, pause, then Auth) in this update
+        // follow a suggestion from comatose3788.
+        const string BuildTag = "update-2026-11-13-proper start & shutdown";
 
         // -- Theme --------------------------------------------------------
         // -- Theme (2026 navy/gold refresh) --------------------------------
@@ -227,6 +230,7 @@ namespace WotlkMenu
             Shown += delegate
             {
                 Log("[INFO] WOTLK Server Manager started.");
+                Log("[INFO] Credits: proper start & shutdown order suggested by comatose3788");
                 Log("[INFO] Build marker: " + BuildTag + " - if you don't see this exact tag, you're running a stale exe, not the latest source");
                 Log("[INFO] Install folder: " + InstallDir);
                 EnableDarkTitleBar();
