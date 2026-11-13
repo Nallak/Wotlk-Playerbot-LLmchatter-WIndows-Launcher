@@ -8,7 +8,7 @@
 // Code:   C# 5 compatible on purpose, so the built-in
 //         csc.exe can compile it. No string interpolation,
 //         no ?. operators - keep it that way when editing!
-// ==============================================================
+// ===============================================================
 
 using System;
 using System.Collections.Generic;
